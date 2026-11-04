@@ -3,24 +3,38 @@
 // Project for Stag Robotics
 // Purpose - use bluetooth gamepad controller to drive launcher robot
 //
-// Using libraries - Bluepad32, and Servo
+// Using libraries - Bluepad32, Adafruit NeoPixel, Adafruit PWM Servo Driver (PCA9685)
 //
-// Code significantly influenced by exampes for Bluepad32 - https://gitlab.com/ricardoquesada/bluepad32
+// Code significantly influenced by examples for Bluepad32 - https://gitlab.com/ricardoquesada/bluepad32
 //
 // https://gitlab.com/ricardoquesada/bluepad32/-/blob/main/docs/plat_nina.md
 // Above link shows how to load the proper firmware onto the arduino/nina boards
 //
 
 #include <Bluepad32.h>
-#include <Servo.h>
 #include <Adafruit_NeoPixel.h>
+#include <Adafruit_PWMServoDriver.h>
 
-int RELAY_PIN = 4;
-Servo leftServo;
-Servo rightServo;
+Adafruit_PWMServoDriver pwm;  // default I2C address 0x40
+
+// Motor PWM settings (microseconds)
+#define PWM_MIN 1000
+#define PWM_NEUTRAL 1500
+#define PWM_MAX 2000
+#define LEFT_MOTOR_CH 0
+#define RIGHT_MOTOR_CH 1
+#define STICK_DEADBAND 50
+
+// Set to true to reverse a side's direction (differential drives usually need one side reversed)
+#define INVERT_LEFT true
+#define INVERT_RIGHT true
+
+int RELAY_PIN = 7;
 ControllerPtr myControllers[BP32_MAX_CONTROLLERS];
-uint8_t old_right = 90;
-uint8_t old_left = 90;
+
+// Smoothed motor outputs, in microseconds
+int16_t old_left = PWM_NEUTRAL;
+int16_t old_right = PWM_NEUTRAL;
 
 // LED Definitions
 #define STRIPLENGTH_SHORT 8  // Popular NeoPixel ring size
@@ -33,11 +47,19 @@ uint8_t old_left = 90;
 #define DIM_RED 10, 0, 0
 #define BLUE 0, 0, 255
 #define DELAYVAL 100  // Time (in milliseconds) to pause between pixels
-#define LED_PIN 3
-#define LEDS_ACTIVE false
+#define LED_PIN 6
+#define LEDS_ACTIVE true
 
-Adafruit_NeoPixel pixels(STRIPLENGTH_SHORT* SHORT_STRIP_COUNT + STRIPLENGTH_LONG + ANTLER_LED_STRIP, LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel pixels(STRIPLENGTH_SHORT * SHORT_STRIP_COUNT + STRIPLENGTH_LONG + ANTLER_LED_STRIP, LED_PIN, NEO_GRB + NEO_KHZ800);
 int ledMode = 0;
+
+// Put both motors in neutral and reset the smoothing state
+void stopMotors() {
+  pwm.writeMicroseconds(LEFT_MOTOR_CH, PWM_NEUTRAL);
+  pwm.writeMicroseconds(RIGHT_MOTOR_CH, PWM_NEUTRAL);
+  old_left = PWM_NEUTRAL;
+  old_right = PWM_NEUTRAL;
+}
 
 // Arduino setup function. Runs in CPU 1
 void setup() {
@@ -48,13 +70,17 @@ void setup() {
     delay(1000);
     retries++;
     if (retries > 5) break;
-    // wait for serial port to connect.
-    // You don't have to do this in your game. This is only for debugging
-    // purposes, so that you can see the output in the serial console.
-    ;
+    // wait for serial port to connect (debugging only)
   }
 
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+
+  // Start the PWM driver first so the motors get neutral as early as possible
+  pwm.begin();
+  pwm.setOscillatorFrequency(28000000);  // nominal; calibrate so 1500 us measures as 1500 us
+  pwm.setPWMFreq(50);
+  stopMotors();
 
   String fv = BP32.firmwareVersion();
   Serial.print("Firmware version installed: ");
@@ -71,26 +97,20 @@ void setup() {
       Serial.println();
   }
 
-  // This call is mandatory. It setups Bluepad32 and creates the callbacks.
+  // This call is mandatory. It sets up Bluepad32 and creates the callbacks.
   BP32.setup(&onConnectedController, &onDisconnectedController);
 
-  // "forgetBluetoothKeys()" should be called when the user performs
-  // a "device factory reset", or similar.
-  // Calling "forgetBluetoothKeys" in setup() just as an example.
-  // Forgetting Bluetooth keys prevents "paired" gamepads to reconnect.
-  // But might also fix some connection / re-connection issues.
+  // Forgetting Bluetooth keys prevents "paired" gamepads from reconnecting,
+  // but might also fix some connection / re-connection issues.
   BP32.forgetBluetoothKeys();
 
-  // open PWM connection to motor controllers
-  leftServo.attach(2);
-  rightServo.attach(1);
-  // set the controllers to idle (90)
-  leftServo.write(90);
-  rightServo.write(90);
   if (LEDS_ACTIVE) {
     pixels.begin();
-  pixels.setBrightness(200);
-  pixels.show();  // initialize all pixels to 'off'
+    pixels.setBrightness(200);
+    pixels.show();  // initialize all pixels to 'off'
+        pixels.fill(pixels.Color(255, 0, 0));
+    pixels.show();
+    delay(2000);
   }
 }
 
@@ -121,10 +141,8 @@ void shoot() {
 
   int diff = STRIPLENGTH_LONG - STRIPLENGTH_SHORT;
 
-  // The first NeoPixel in a strand is #0, second is 1, all the way up
-  // to the count of pixels minus one
-  pixels.fill(pixels.Color(WHITE));  //, 0 , STRIPLENGTH_LONG + (SHORT_STRIP_COUNT * STRIPLENGTH_SHORT) +  100);
-  pixels.show();                     // Send the updated pixel colors to the hardware.
+  pixels.fill(pixels.Color(WHITE));
+  pixels.show();  // Send the updated pixel colors to the hardware.
 
   for (int i = 0; i < STRIPLENGTH_LONG; i++) {  // For each pixel...
 
@@ -147,8 +165,7 @@ void shoot() {
     pixels.setPixelColor(i + STRIPLENGTH_LONG + STRIPLENGTH_SHORT * SHORT_STRIP_COUNT, pixels.Color(BLUE));
   }
   pixels.show();
-  delay(3000);  // Pause before next pass through loop
-  // Send the updated pixel colors to the hardware.
+  delay(1000);
 }
 
 void idle() {
@@ -201,6 +218,7 @@ void idle() {
     delay(50);  // Pause before next pass through loop
   }
 }
+
 // This callback gets called any time a new gamepad is connected.
 // Up to 4 gamepads can be connected at the same time.
 void onConnectedController(ControllerPtr ctl) {
@@ -212,8 +230,7 @@ void onConnectedController(ControllerPtr ctl) {
       myControllers[i] = ctl;
       foundEmptySlot = true;
 
-      // Optional, once the gamepad is connected, request further info about the
-      // gamepad.
+      // Optional, once the gamepad is connected, request further info about the gamepad.
       ControllerProperties properties = ctl->getProperties();
       char buf[80];
       sprintf(buf,
@@ -227,8 +244,7 @@ void onConnectedController(ControllerPtr ctl) {
     }
   }
   if (!foundEmptySlot) {
-    Serial.println(
-      "CALLBACK: Controller connected, but could not found empty slot");
+    Serial.println("CALLBACK: Controller connected, but could not find empty slot");
   }
 }
 
@@ -241,26 +257,21 @@ void onDisconnectedController(ControllerPtr ctl) {
       Serial.println(i);
       myControllers[i] = nullptr;
       foundGamepad = true;
-      // make sure servos are set to idle
-      leftServo.write(90);
-      rightServo.write(90);
+      stopMotors();  // make sure motors are set to neutral
       break;
     }
   }
 
   if (!foundGamepad) {
-    Serial.println(
-      "CALLBACK: Controller disconnected, but not found in myControllers");
+    Serial.println("CALLBACK: Controller disconnected, but not found in myControllers");
   }
 }
 
 void processGamepad(ControllerPtr gamepad) {
-  // There are different ways to query whether a button is pressed.
-  // By query each button individually:
-  //  a(), b(), x(), y(), l1(), etc...
-
   if (gamepad->a()) {
+    shoot();
     Serial.print("A pressed.");
+    stopMotors();  // the delay below blocks the loop, so stop the motors first
     digitalWrite(RELAY_PIN, HIGH);
     delay(4000);
     digitalWrite(RELAY_PIN, LOW);
@@ -269,11 +280,6 @@ void processGamepad(ControllerPtr gamepad) {
   if (gamepad->b()) {
     Serial.print("B pressed.");
     if (ledMode == 0) {
-      Serial.print("detaching servos");
-      leftServo.write(88);
-      rightServo.write(88);
-      leftServo.detach();
-      rightServo.detach();
       ledMode = 1;
     } else {
       ledMode = 2;
@@ -281,23 +287,23 @@ void processGamepad(ControllerPtr gamepad) {
   }
   if (gamepad->y()) {
     Serial.print("Y pressed.");
-    if (ledMode > 0) {
-      Serial.print("Re-attaching servos");
-      leftServo.attach(2);
-      rightServo.attach(1);
-    }
     ledMode = 0;
   }
 
   if (ledMode > 0) {
+    stopMotors();  // driving is disabled in these modes, so hold neutral
     return;
   }
+
   // set motor speeds - algorithm from - https://xiaoxiae.github.io/Robotics-Simplified-Website/drivetrain-control/arcade-drive/
   int32_t drive = -gamepad->axisY();  // gamepad returns -512 for this axis when pushed fully up
   int32_t rotate = gamepad->axisX();
-  if (rotate > 0 && rotate < 50) rotate = 0;
-  if (rotate < 0 && rotate > -50) rotate = 0;
+
+  // deadband on both axes so stick drift doesn't make the robot creep
+  if (abs(drive) < STICK_DEADBAND) drive = 0;
+  if (abs(rotate) < STICK_DEADBAND) rotate = 0;
   rotate = rotate / 2;
+
   int32_t maximum = max(abs(drive), abs(rotate));
   int32_t total = drive + rotate;
   int32_t difference = drive - rotate;
@@ -305,99 +311,58 @@ void processGamepad(ControllerPtr gamepad) {
 
   // set speed according to the quadrant that the values are in
   if (drive < 0) {      // backwards
-    if (rotate >= 0) {  // # IV quadrant
+    if (rotate >= 0) {  // IV quadrant
       left = total;
       right = -maximum;
-    } else {  // # III quadrant
+    } else {  // III quadrant
       left = -maximum;
       right = difference;
     }
   } else {              // forward
-    if (rotate >= 0) {  // # I quadrant
+    if (rotate >= 0) {  // I quadrant
       left = maximum;
       right = difference;
-    } else {  //  # II quadrant
+    } else {  // II quadrant
       left = total;
       right = maximum;
     }
   }
 
-  right = map(right, -512, 512, 0, 180);
-  left = map(left, -512, 512, 0, 180);
-
-
-  // old algorithm
-  // right = map(drive + rotate, -720, 720, 0, 180);
-  // left = map(drive - rotate, -720, 720, 0, 180);
+  // convert -512..512 to pulse width in microseconds
+  int32_t leftUs = INVERT_LEFT ? map(left, -512, 512, PWM_MAX, PWM_MIN)
+                               : map(left, -512, 512, PWM_MIN, PWM_MAX);
+  int32_t rightUs = INVERT_RIGHT ? map(right, -512, 512, PWM_MAX, PWM_MIN)
+                                 : map(right, -512, 512, PWM_MIN, PWM_MAX);
 
   if (gamepad->r2() || gamepad->l2()) {
-    left = right;
+    leftUs = rightUs;
   }
-  if (right == 90) right = 88;
-  if (left == 90) left = 88;
-  leftServo.write(180 - (left + old_left) / 2);
-  rightServo.write(180 - (right + old_right) / 2);
-  old_left = (left + old_left) / 2;
-  old_right = (right + old_right) / 2;
 
-  char buf[256];
+  // simple smoothing: average with the previous output, clamped to the valid range
+  old_left = constrain((leftUs + old_left) / 2, PWM_MIN, PWM_MAX);
+  old_right = constrain((rightUs + old_right) / 2, PWM_MIN, PWM_MAX);
+
+  pwm.writeMicroseconds(LEFT_MOTOR_CH, old_left);
+  pwm.writeMicroseconds(RIGHT_MOTOR_CH, old_right);
+
+  char buf[128];
   snprintf(buf, sizeof(buf) - 1,
-           "X: %4li, Y: %4li => L: %4li, R: %4li",
-           rotate, drive, left, right);
+           "X: %4li, Y: %4li => L: %4li, R: %4li => Lus: %4d, Rus: %4d",
+           (long)rotate, (long)drive, (long)left, (long)right, old_left, old_right);
   Serial.println(buf);
-
-  // Another way to query the buttons, is by calling buttons(), or
-  // miscButtons() which return a bitmask.
-  // Some gamepads also have DPAD, axis and more.
-  // char buf[256];
-  // snprintf(buf, sizeof(buf) - 1,
-  //          "idx=%d, dpad: 0x%02x, buttons: 0x%04x, "
-  //          "axis L: %4li, %4li, axis R: %4li, %4li, "
-  //          "brake: %4ld, throttle: %4li, misc: 0x%02x, "
-  //          "gyro x:%6d y:%6d z:%6d, accel x:%6d y:%6d z:%6d, "
-  //          "battery: %d",
-  //          gamepad->index(),        // Gamepad Index
-  //          gamepad->dpad(),         // DPAD
-  //          gamepad->buttons(),      // bitmask of pressed buttons
-  //          gamepad->axisX(),        // (-511 - 512) left X Axis
-  //          gamepad->axisY(),        // (-511 - 512) left Y axis
-  //          gamepad->axisRX(),       // (-511 - 512) right X axis
-  //          gamepad->axisRY(),       // (-511 - 512) right Y axis
-  //          gamepad->brake(),        // (0 - 1023): brake button
-  //          gamepad->throttle(),     // (0 - 1023): throttle (AKA gas) button
-  //          gamepad->miscButtons(),  // bitmak of pressed "misc" buttons
-  //          gamepad->gyroX(),      // Gyro X
-  //          gamepad->gyroY(),      // Gyro Y
-  //          gamepad->gyroZ(),      // Gyro Z
-  //          gamepad->accelX(),     // Accelerometer X
-  //          gamepad->accelY(),     // Accelerometer Y
-  //          gamepad->accelZ(),     // Accelerometer Z
-  //          gamepad->battery()       // 0=Unknown, 1=empty, 255=full
-
-  // );
-  // Serial.println(buf);
-  // Serial.print("=");
-  // You can query the axis and other properties as well. See
-  // Controller.h For all the available functions.
 }
-
 
 // Arduino loop function. Runs in CPU 1
 void loop() {
   // This call fetches all the controller info from the NINA (ESP32) module.
-  // Just call this function in your main loop.
-  // The controllers pointer (the ones received in the callbacks) gets updated
-  // automatically.
   BP32.update();
-  Serial.print("-");
+
   // It is safe to always do this before using the controller API.
   // This guarantees that the controller is valid and connected.
   for (int i = 0; i < BP32_MAX_CONTROLLERS; i++) {
     ControllerPtr myController = myControllers[i];
     if (myController && myController->isConnected()) {
-      Serial.print(".");
       processGamepad(myController);
-      Serial.println("+");
     }
   }
   if (ledMode == 1) idle();
