@@ -1,5 +1,3 @@
-// the loop function runs over and over again forever
-//
 // Project for Stag Robotics
 // Purpose - use bluetooth gamepad controller to drive launcher robot
 //
