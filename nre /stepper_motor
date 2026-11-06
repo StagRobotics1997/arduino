@@ -1,0 +1,147 @@
+// Two-button jog control: Arduino Uno -> IDC1-42 integrated NEMA 17 stepper
+// Hold FWD button -> motor turns one way. Hold REV button -> the other way.
+// Release (or press both) -> motor ramps down and stops.
+//
+// Driver inputs are common-anode optocouplers (XCOM = +5V):
+// Uno pin LOW = input active, HIGH = inactive.
+// Buttons wire between the pin and GND, using the internal pull-ups.
+//
+// =====================================================================
+//  WIRING: Arduino Uno -> IDC1-42 integrated stepper + 2 jog buttons
+// =====================================================================
+//
+//    ARDUINO UNO                          IDC1-42 DRIVER
+//   +------------+                       +------------------+
+//   |         5V |-----------------------| XCOM             |
+//   |         D2 |-----------------------| PU-  (pulse)     |
+//   |         D3 |-----------------------| DR-  (direction) |
+//   |         D4 |- - - - - - - - - - - -| MF-  (enable)    |
+//   |            |      (optional)       |                  |
+//   |         D5 |----[ FWD ]----+       |                  |
+//   |            |               |       |                  |
+//   |         D6 |----[ REV ]----+       |                  |
+//   |            |               |       |                  |
+//   |        GND |---------------+       |                  |
+//   +------------+                       |                  |
+//                                        |                  |
+//    24V SUPPLY (12-30V, 2A+)            |                  |
+//   +------------+                       |                  |
+//   |          + |-----------------------| DC+              |
+//   |          - |-----------------------| GND              |
+//   +------------+                       +------------------+
+//
+//  NOTES
+//   - Buttons are momentary, wired between the pin and Uno GND.
+//     No resistors needed: the sketch uses INPUT_PULLUP.
+//   - Driver inputs are optically isolated: no Uno GND wire to the
+//     driver. Keep the 24V supply separate from the Uno.
+//   - Inputs are active LOW (Uno pin LOW = signal on).
+//   - Leave MF- unconnected if not using enable (floating = enabled).
+//
+//  DIP SWITCHES
+//   SW1 = ON   (1.5A, matches motor rating)
+//   SW2 = OFF  \
+//   SW3 = OFF   >  1600 pulses/rev
+//   SW4 = ON   /
+// =====================================================================
+//
+const int PIN_PULSE   = 2;   // -> PU-
+const int PIN_DIR     = 3;   // -> DR-
+const int PIN_ENABLE  = 4;   // -> MF- (optional)
+const int PIN_BTN_FWD = 5;   // button to GND
+const int PIN_BTN_REV = 6;   // button to GND
+
+const long STEPS_PER_REV = 1600;      // DIP: SW2 off, SW3 off, SW4 on
+
+// Speed settings (steps per second)
+const float START_SPEED = 400.0;      // speed the motor starts/stops at
+const float MAX_SPEED   = 3200.0;     // 2 rev/s = 120 RPM at 1600 steps/rev
+const float ACCEL       = 4000.0;     // steps per second, per second
+
+const unsigned long DEBOUNCE_MS = 20;
+
+float speed = 0;                      // current speed, 0 = stopped
+int   currentDir = 0;                 // +1, -1, or 0 when stopped
+unsigned long lastStepMicros = 0;
+
+// --- simple debounced button reading ---
+bool readButton(int pin, bool &stableState, bool &lastRaw, unsigned long &lastChange) {
+  bool raw = (digitalRead(pin) == LOW);   // pressed = LOW with pull-up
+  if (raw != lastRaw) {
+    lastRaw = raw;
+    lastChange = millis();
+  }
+  if (millis() - lastChange > DEBOUNCE_MS) {
+    stableState = raw;
+  }
+  return stableState;
+}
+
+bool fwdStable = false, fwdRaw = false; unsigned long fwdChange = 0;
+bool revStable = false, revRaw = false; unsigned long revChange = 0;
+
+void setDirection(int dir) {
+  digitalWrite(PIN_DIR, dir > 0 ? HIGH : LOW);
+  delayMicroseconds(100);             // datasheet: DIR set >= 50 us before pulse
+  currentDir = dir;
+}
+
+void stepPulse() {
+  digitalWrite(PIN_PULSE, LOW);       // optocoupler on
+  delayMicroseconds(5);               // datasheet: pulse width > 2.5 us
+  digitalWrite(PIN_PULSE, HIGH);
+}
+
+void setup() {
+  // Outputs idle HIGH (inactive) before enabling them
+  digitalWrite(PIN_PULSE, HIGH);
+  digitalWrite(PIN_DIR, HIGH);
+  digitalWrite(PIN_ENABLE, HIGH);     // assumption: HIGH = motor enabled
+  pinMode(PIN_PULSE, OUTPUT);
+  pinMode(PIN_DIR, OUTPUT);
+  pinMode(PIN_ENABLE, OUTPUT);
+
+  pinMode(PIN_BTN_FWD, INPUT_PULLUP);
+  pinMode(PIN_BTN_REV, INPUT_PULLUP);
+}
+
+void loop() {
+  bool fwd = readButton(PIN_BTN_FWD, fwdStable, fwdRaw, fwdChange);
+  bool rev = readButton(PIN_BTN_REV, revStable, revRaw, revChange);
+
+  // Which way do we want to go? Both or neither pressed = stop.
+  int wantDir = 0;
+  if (fwd && !rev) wantDir = +1;
+  if (rev && !fwd) wantDir = -1;
+
+  // Start moving from a standstill
+  if (currentDir == 0 && wantDir != 0) {
+    setDirection(wantDir);
+    speed = START_SPEED;
+    lastStepMicros = micros();
+  }
+
+  if (currentDir == 0) return;        // stopped, nothing to do
+
+  unsigned long now = micros();
+  unsigned long interval = (unsigned long)(1000000.0 / speed);
+
+  if (now - lastStepMicros >= interval) {
+    lastStepMicros += interval;
+    stepPulse();
+
+    // Ramp up while the matching button is held; ramp down otherwise
+    // (button released, both pressed, or the other button pressed)
+    float dv = ACCEL / speed;         // speed change for this one step
+    if (wantDir == currentDir) {
+      speed = min(speed + dv, MAX_SPEED);
+    } else {
+      speed -= dv;
+      if (speed <= START_SPEED) {
+        // Slow enough to stop; next pass can start in the new direction
+        speed = 0;
+        currentDir = 0;
+      }
+    }
+  }
+}
